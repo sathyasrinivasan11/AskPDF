@@ -1,4 +1,8 @@
 streamlit>=1.39,<2
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9,<1
+requests>=2.32,<3
 pymupdf>=1.24
 pymupdf4llm>=0.0.17
 langchain-core>=0.3,<2

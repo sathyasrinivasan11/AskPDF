@@ -50,7 +50,12 @@ class AskPDF:
             total += self.ingest_upload(LocalUpload())
         return total
 
-    def ask(self, question: str, allow_general_knowledge: bool = False) -> Answer:
+    def ask(
+        self,
+        question: str,
+        allow_general_knowledge: bool = False,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> Answer:
         decision = classify_query(question)
         if decision.kind is QueryKind.AMBIGUOUS:
             return Answer(
@@ -65,7 +70,11 @@ class AskPDF:
                 not_found=True,
             )
         results = index.search(question, self.settings.top_k)
-        answer = synthesize_answer(question, results, self.settings.chat_model)
+        answer = synthesize_answer(
+            question, results, self.settings.chat_model, conversation_history
+        )
         if answer.not_found and allow_general_knowledge:
-            return general_knowledge_answer(question, self.settings.chat_model)
+            return general_knowledge_answer(
+                question, self.settings.chat_model, conversation_history
+            )
         return answer

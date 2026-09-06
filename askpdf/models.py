@@ -34,3 +34,4 @@ class Answer:
     clarification_question: str = ""
     not_found: bool = False
     used_general_knowledge: bool = False
+    conversation_id: str = ""

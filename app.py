@@ -1,128 +1,160 @@
-"""Streamlit entrypoint for AskPDF."""
+"""Streamlit frontend for the AskPDF FastAPI backend."""
 
 from __future__ import annotations
 
+import os
+
+import requests
 import streamlit as st
 
-from askpdf.answering import citation_label, pdf_link
-from askpdf.config import settings
-from askpdf.service import AskPDF
 
+API_URL = os.getenv("ASKPDF_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
 st.set_page_config(page_title="AskPDF", page_icon="📄", layout="wide")
 st.title("📄 AskPDF")
 st.caption("Ask questions against your PDFs with page-level, section-aware citations.")
 
 
-@st.cache_resource
-def get_service() -> AskPDF:
-    return AskPDF(settings)
+def api_request(method: str, path: str, **kwargs):
+    try:
+        response = requests.request(method, f"{API_URL}{path}", timeout=300, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not reach the FastAPI server at {API_URL}. "
+            "Start it with `uvicorn askpdf.apps.main:app --reload`."
+        ) from exc
 
 
-service = get_service()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = None
 
 with st.sidebar:
     st.header("Upload PDFs")
-    st.write("Upload up to 10 PDFs at once, or add one at a time.")
     uploads = st.file_uploader(
-        "Choose PDF files",
+        "Choose one or up to 10 PDF files",
         type=["pdf"],
         accept_multiple_files=True,
-        key="pdf_uploads",
     )
     if len(uploads) > 10:
         st.error("Please select no more than 10 PDFs.")
     elif st.button("Index selected PDFs", disabled=not uploads):
-        with st.status("Extracting and indexing PDFs…", expanded=True) as status:
+        with st.status("Sending PDFs to the backend...", expanded=True) as status:
             try:
-                chunks = sum(service.ingest_upload(item) for item in uploads)
-                status.update(label=f"Indexed {chunks} chunks", state="complete")
-                st.session_state["indexed"] = True
-            except Exception as exc:
+                payload = api_request(
+                    "POST",
+                    "/ingest/file",
+                    files=[
+                        ("files", (item.name, item.getvalue(), "application/pdf"))
+                        for item in uploads
+                    ],
+                )
+                status.update(
+                    label=f"Indexed {payload['total_chunks']} chunks",
+                    state="complete",
+                )
+            except RuntimeError as exc:
                 status.update(label="Indexing failed", state="error")
                 st.error(str(exc))
     st.divider()
-    st.info("Default scope is uploaded PDFs only. General knowledge is never used without consent.")
+    st.info("Answers stay inside your PDFs unless you explicitly choose general knowledge.")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+
+def render_citations(citations: list[dict], message_id: int) -> None:
+    if not citations:
+        return
+    st.markdown("**Sources**")
+    seen: set[str] = set()
+    for index, citation in enumerate(citations):
+        key = f"{citation['document_id']}:{citation['page']}:{citation['section']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        url = f"{API_URL}{citation['url']}"
+        st.markdown(f"- [{citation['label']}]({url})")
+        try:
+            pdf = requests.get(
+                f"{API_URL}/documents/{citation['document_id']}/file", timeout=60
+            )
+            pdf.raise_for_status()
+            st.download_button(
+                f"Download {citation['filename']} (page {citation['page']})",
+                data=pdf.content,
+                file_name=citation["filename"],
+                mime="application/pdf",
+                key=f"download-{message_id}-{index}",
+            )
+        except requests.RequestException:
+            st.caption("Download unavailable; use the citation link instead.")
+
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if message.get("citations"):
-            st.markdown("**Sources**")
-            for citation in message["citations"]:
-                result = citation["result"]
-                st.markdown(
-                    f"- [{citation['label']}]({citation['url']}) "
-                    "(the PDF is also available from the download button below)"
-                )
-                st.download_button(
-                    f"Download {result['filename']} (page {result['page']})",
-                    data=open(result["source_path"], "rb").read(),
-                    file_name=result["filename"],
-                    mime="application/pdf",
-                    key=f"download-{result['chunk_id']}-{message['id']}",
-                )
+        render_citations(message.get("citations", []), message["id"])
 
-if question := st.chat_input("Ask a question about your uploaded PDFs…"):
-    st.session_state.messages.append({"role": "user", "content": question})
+if question := st.chat_input("Ask a question about your uploaded PDFs..."):
+    st.session_state.messages.append(
+        {"role": "user", "content": question, "id": len(st.session_state.messages)}
+    )
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
-        with st.spinner("Searching your PDFs…"):
+        with st.spinner("Searching your PDFs..."):
             try:
-                answer = service.ask(question)
-            except Exception as exc:
-                st.error(f"Unable to answer: {exc}")
+                answer = api_request(
+                    "POST",
+                    "/chat",
+                    json={
+                        "message": question,
+                        "conversation_id": st.session_state.conversation_id,
+                    },
+                )
+                st.session_state.conversation_id = answer["conversation_id"]
+            except RuntimeError as exc:
+                st.error(str(exc))
                 st.stop()
-        st.markdown(answer.text)
-        citations = []
-        if answer.citations:
-            st.markdown("**Sources**")
-            seen: set[str] = set()
-            for result in answer.citations:
-                key = f"{result.metadata.get('filename')}:{result.metadata.get('page')}:{result.metadata.get('section')}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                label = citation_label(result)
-                st.markdown(f"- [{label}]({pdf_link(result)})")
-                source_path = result.metadata.get("source_path")
-                if source_path:
-                    with open(source_path, "rb") as pdf:
-                        st.download_button(
-                            f"Download {label}",
-                            data=pdf.read(),
-                            file_name=result.metadata.get("filename", "document.pdf"),
-                            mime="application/pdf",
-                            key=f"download-live-{key}",
-                        )
-                citations.append({"label": label, "url": pdf_link(result), "result": {
-                    **result.metadata, "source_path": source_path
-                }})
-        if answer.not_found:
-            st.warning("I could not find an answer in the uploaded PDFs.")
-            st.session_state["pending_general_question"] = question
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": answer.text,
-            "citations": citations,
-            "id": len(st.session_state.messages),
-        })
+        st.markdown(answer["answer"])
+        render_citations(answer["citations"], len(st.session_state.messages))
+        if answer["not_found"]:
+            st.session_state.pending_general_question = question
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": answer["answer"],
+                "citations": answer["citations"],
+                "id": len(st.session_state.messages),
+            }
+        )
 
 if st.session_state.get("pending_general_question"):
     st.divider()
-    question = st.session_state["pending_general_question"]
     st.warning("This is not in the uploaded PDFs. Use general knowledge instead?")
-    col_yes, col_no = st.columns(2)
-    if col_yes.button("Yes, use general knowledge", key="general-yes"):
-        with st.spinner("Asking Gemini general knowledge…"):
-            answer = service.ask(question, allow_general_knowledge=True)
-        st.session_state.messages.append({"role": "assistant", "content": answer.text, "citations": [], "id": len(st.session_state.messages)})
-        del st.session_state["pending_general_question"]
+    yes, no = st.columns(2)
+    if yes.button("Yes, use general knowledge", key="general-yes"):
+        with st.spinner("Asking Gemini general knowledge..."):
+            answer = api_request(
+                "POST",
+                "/chat",
+                json={
+                    "message": st.session_state.pending_general_question,
+                    "conversation_id": st.session_state.conversation_id,
+                    "allow_general_knowledge": True,
+                },
+            )
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": answer["answer"],
+                "citations": [],
+                "id": len(st.session_state.messages),
+            }
+        )
+        del st.session_state.pending_general_question
         st.rerun()
-    if col_no.button("No, stay PDF-only", key="general-no"):
-        del st.session_state["pending_general_question"]
+    if no.button("No, stay PDF-only", key="general-no"):
+        del st.session_state.pending_general_question
         st.rerun()

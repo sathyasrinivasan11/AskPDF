@@ -42,16 +42,28 @@ def _gemini(model: str):
     return ChatGoogleGenerativeAI(model=model, temperature=0)
 
 
-def synthesize_answer(question: str, results: list[SearchResult], model: str) -> Answer:
+def synthesize_answer(
+    question: str,
+    results: list[SearchResult],
+    model: str,
+    conversation_history: list[dict[str, str]] | None = None,
+) -> Answer:
     if not results:
         return Answer(
             text="I couldn't find that in the uploaded PDFs.",
             not_found=True,
         )
+    history = "\n".join(
+        f"{item.get('role', 'user').title()}: {item.get('content', '')}"
+        for item in (conversation_history or [])[-6:]
+    )
     prompt = f"""Answer the question using only the PDF excerpts below.
 If the excerpts do not support an answer, say exactly: NOT_FOUND.
 Do not use outside knowledge. Be concise and cite every factual claim with
 the bracket number of its supporting excerpt, such as [1] or [2].
+
+Conversation history (use only to understand follow-up questions):
+{history or "(none)"}
 
 Question: {question}
 
@@ -69,10 +81,17 @@ PDF excerpts:
     return Answer(text=text, citations=results)
 
 
-def general_knowledge_answer(question: str, model: str) -> Answer:
+def general_knowledge_answer(
+    question: str, model: str, conversation_history: list[dict[str, str]] | None = None
+) -> Answer:
+    history = "\n".join(
+        f"{item.get('role', 'user').title()}: {item.get('content', '')}"
+        for item in (conversation_history or [])[-6:]
+    )
     response = _gemini(model).invoke(
         "Answer this question from general knowledge. State that this is not "
-        "from the uploaded PDFs, and be concise:\n\n" + question
+        "from the uploaded PDFs, and be concise.\n\n"
+        f"Conversation history:\n{history or '(none)'}\n\nQuestion: {question}"
     )
     text = response.content if isinstance(response.content, str) else str(response.content)
     return Answer(text=text, used_general_knowledge=True)
