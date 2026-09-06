@@ -47,8 +47,9 @@ def chunk_pages(
     )
     result: list[Document] = []
     for page in pages:
+        page_chunk_index = 0
         for section, text in sectionize(page.markdown, page.section):
-            for piece_index, piece in enumerate(splitter.split_text(text)):
+            for piece in splitter.split_text(text):
                 if not piece.strip():
                     continue
                 result.append(
@@ -60,9 +61,10 @@ def chunk_pages(
                             "source_path": page.source_path,
                             "page": page.page,
                             "section": section or "Document",
-                            "chunk": piece_index,
+                            "chunk": page_chunk_index,
                             "images": page.images,
                         },
                     )
                 )
+                page_chunk_index += 1
     return result

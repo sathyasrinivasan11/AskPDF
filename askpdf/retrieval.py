@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from hashlib import sha1
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -97,16 +98,41 @@ class HybridIndex:
         if not docs:
             return 0
         ids: list[str] = []
+        document_ids = {
+            str(doc.metadata["document_id"])
+            for doc in docs
+            if doc.metadata.get("document_id")
+        }
+        # Re-indexing a document must replace its old chunks, including chunks
+        # written by older versions of the ID scheme.
+        store = self._store()
+        with self._connect() as db:
+            for document_id in document_ids:
+                old_ids = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT chunk_id FROM chunks WHERE document_id = ?",
+                        (document_id,),
+                    ).fetchall()
+                ]
+                db.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+                for old_id in old_ids:
+                    db.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (old_id,))
+        if document_ids:
+            store.delete(where={"document_id": {"$in": list(document_ids)}})
+
         with self._connect() as db:
             for index, doc in enumerate(docs):
                 metadata = doc.metadata
+                section_key = sha1(
+                    str(metadata.get("section", "Document")).encode("utf-8")
+                ).hexdigest()[:10]
                 chunk_id = (
                     f"{metadata.get('document_id', 'doc')}:"
-                    f"{metadata.get('page', 0)}:{metadata.get('chunk', index)}"
+                    f"{metadata.get('page', 0)}:{section_key}:"
+                    f"{metadata.get('chunk', index)}"
                 )
                 ids.append(chunk_id)
-                db.execute("DELETE FROM chunks WHERE chunk_id = ?", (chunk_id,))
-                db.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk_id,))
                 db.execute(
                     "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -128,10 +154,8 @@ class HybridIndex:
                         metadata.get("section", ""),
                     ),
                 )
-        # Chroma's current API persists automatically. Delete first so
-        # re-indexing an unchanged upload cannot create duplicate vectors.
-        store = self._store()
-        store.delete(ids=ids)
+        # Chroma's current API persists automatically. IDs are unique even
+        # when separate sections have the same page-local chunk number.
         store.add_documents(docs, ids=ids)
         return len(docs)
 
