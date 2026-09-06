@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AskPDF local document and index state
+data/*
+!data/.gitkeep
+!data/documents/
+!data/documents/.gitkeep
+!data/index/
+!data/index/.gitkeep
