@@ -135,6 +135,7 @@ The frontend uses these endpoints:
 | --- | --- |
 | `GET /health` | Confirms that the backend is running |
 | `POST /ingest/file` | Accepts one to ten PDF files and indexes them |
+| `POST /ingest/embeddings` | Backfills missing Chroma embeddings without duplicating chunks |
 | `POST /chat` | Answers a question and maintains a conversation ID |
 | `GET /documents/{document_id}/file` | Serves a stored PDF for page-linked citations |
 | `GET /docs` | Opens FastAPI's interactive API documentation |
@@ -142,6 +143,17 @@ The frontend uses these endpoints:
 For `/chat`, send `message` and optionally reuse the returned
 `conversation_id`. Set `allow_general_knowledge` to `true` only after the user
 has explicitly agreed to leave the PDF-only scope.
+
+If an upload succeeded while Gemini embeddings were unavailable, restore network
+access and confirm `GOOGLE_API_KEY` is loaded, then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ingest/embeddings
+```
+
+This reads the existing SQLite chunks and adds only vectors missing from
+Chroma. It does not re-extract the PDF, duplicate chunks, or replace existing
+vectors.
 
 ## Libraries used, at a high level
 

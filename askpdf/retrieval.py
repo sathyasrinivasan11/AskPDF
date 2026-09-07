@@ -231,6 +231,48 @@ class HybridIndex:
         with self._connect() as db:
             return db.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
 
+    def backfill_embeddings(self) -> int:
+        """Create vectors for SQLite chunks that are not already in Chroma."""
+        if self._embeddings is None:
+            raise RuntimeError(self._semantic_search_error)
+        store = self._store()
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT chunk_id, text, document_id, filename, source_path, page, section
+                   FROM chunks ORDER BY rowid"""
+            ).fetchall()
+        if not rows:
+            return 0
+
+        chunk_ids = [row["chunk_id"] for row in rows]
+        existing = set(store.get(ids=chunk_ids, include=[])["ids"])
+        missing = [
+            row for row in rows if row["chunk_id"] not in existing
+        ]
+        if not missing:
+            self._semantic_search_enabled = True
+            self._semantic_search_error = ""
+            return 0
+
+        documents = [
+            Document(
+                page_content=row["text"],
+                metadata={
+                    "chunk_id": row["chunk_id"],
+                    "document_id": row["document_id"],
+                    "filename": row["filename"],
+                    "source_path": row["source_path"],
+                    "page": row["page"],
+                    "section": row["section"],
+                },
+            )
+            for row in missing
+        ]
+        store.add_documents(documents, ids=[row["chunk_id"] for row in missing])
+        self._semantic_search_enabled = True
+        self._semantic_search_error = ""
+        return len(missing)
+
     @property
     def semantic_search_available(self) -> bool:
         return self._semantic_search_enabled
