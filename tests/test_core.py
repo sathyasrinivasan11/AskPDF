@@ -3,6 +3,11 @@ from askpdf.chunking import sectionize
 from askpdf.models import SearchResult
 from askpdf.retrieval import reciprocal_rank_fusion
 from askpdf.scope import QueryKind, classify_query, should_use_general_knowledge
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from langchain_core.documents import Document
+from askpdf.retrieval import HybridIndex
 
 
 def result(chunk_id: str, score: float = 1) -> SearchResult:
@@ -40,3 +45,43 @@ def test_citation_has_exact_page_and_section():
     item = result("x")
     assert "page 3" in citation_label(item)
     assert pdf_link(item).endswith("guide.pdf#page=3")
+
+
+def test_embedding_backfill_uses_existing_chunk_ids_without_duplicates():
+    class FakeStore:
+        def __init__(self):
+            self.ids = set()
+
+        def get(self, ids, include):
+            return {"ids": [item for item in ids if item in self.ids]}
+
+        def delete(self, **kwargs):
+            self.ids.clear()
+
+        def add_documents(self, documents, ids):
+            assert len(ids) == len(set(ids))
+            self.ids.update(ids)
+
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        index = HybridIndex(root / "docs.sqlite3", root / "chroma", embeddings=object())
+        index._vectorstore = FakeStore()
+        documents = [
+            Document(
+                page_content="existing chunk",
+                metadata={
+                    "document_id": "doc",
+                    "filename": "guide.pdf",
+                    "source_path": str(root / "guide.pdf"),
+                    "page": 1,
+                    "section": "Overview",
+                    "chunk": 0,
+                },
+            )
+        ]
+        index.add_documents(documents)
+        index._vectorstore.ids.clear()
+        index._semantic_search_enabled = False
+        created = index.backfill_embeddings()
+        assert created == 1
+        assert index.backfill_embeddings() == 0

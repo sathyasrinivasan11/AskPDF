@@ -40,6 +40,17 @@ class AskPDF:
             self.index = HybridIndex(
                 self.settings.sqlite_path, self.settings.chroma_dir, self._embeddings
             )
+        elif self._embeddings is None:
+            try:
+                from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+                self._embeddings = GoogleGenerativeAIEmbeddings(
+                    model=self.settings.embedding_model
+                )
+                self.index._embeddings = self._embeddings
+                self.index._semantic_search_enabled = True
+            except Exception:
+                pass
         return self.index
 
     def ingest_upload(self, uploaded) -> int:
@@ -55,6 +66,16 @@ class AskPDF:
     @property
     def semantic_search_error(self) -> str:
         return self.index.semantic_search_error if self.index else ""
+
+    def backfill_embeddings(self) -> int:
+        """Backfill missing vectors without changing SQLite chunks."""
+        index = self._get_index()
+        try:
+            return index.backfill_embeddings()
+        except Exception as exc:
+            index._semantic_search_enabled = False
+            index._semantic_search_error = str(exc)
+            raise
 
     def ingest_paths(self, paths: list[Path]) -> int:
         total = 0
