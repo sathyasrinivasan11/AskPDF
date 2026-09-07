@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 
 from .answering import general_knowledge_answer, synthesize_answer
 from .chunking import chunk_pages
@@ -11,6 +12,8 @@ from .ingestion import extract_pdf, save_uploaded_pdf
 from .models import Answer
 from .retrieval import HybridIndex
 from .scope import QueryKind, classify_query
+
+logger = logging.getLogger(__name__)
 
 
 class AskPDF:
@@ -22,11 +25,18 @@ class AskPDF:
 
     def _get_index(self) -> HybridIndex:
         if self.index is None:
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            try:
+                from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-            self._embeddings = GoogleGenerativeAIEmbeddings(
-                model=self.settings.embedding_model
-            )
+                self._embeddings = GoogleGenerativeAIEmbeddings(
+                    model=self.settings.embedding_model
+                )
+            except Exception as exc:
+                # PDF ingestion can still provide reliable exact-term search
+                # through SQLite FTS5 when Gemini is not configured or reachable.
+                logger.warning(
+                    "Gemini embeddings unavailable; using lexical retrieval: %s", exc
+                )
             self.index = HybridIndex(
                 self.settings.sqlite_path, self.settings.chroma_dir, self._embeddings
             )
@@ -37,6 +47,14 @@ class AskPDF:
         pages = extract_pdf(path, doc_id)
         docs = chunk_pages(pages, self.settings.chunk_size, self.settings.chunk_overlap)
         return self._get_index().add_documents(docs)
+
+    @property
+    def semantic_search_available(self) -> bool:
+        return self.index is not None and self.index.semantic_search_available
+
+    @property
+    def semantic_search_error(self) -> str:
+        return self.index.semantic_search_error if self.index else ""
 
     def ingest_paths(self, paths: list[Path]) -> int:
         total = 0

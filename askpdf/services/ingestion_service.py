@@ -29,4 +29,15 @@ async def ingest_uploads(service: AskPDF, uploads: list[UploadFile]) -> dict:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         indexed.append({"filename": filename, "chunks": chunks})
-    return {"indexed": indexed, "total_chunks": sum(item["chunks"] for item in indexed)}
+    response = {
+        "indexed": indexed,
+        "total_chunks": sum(item["chunks"] for item in indexed),
+        "semantic_search_available": service.semantic_search_available,
+    }
+    if not service.semantic_search_available:
+        response["warning"] = (
+            "Gemini embeddings were unavailable, so the documents were indexed "
+            "with keyword search only. Restore network access and restart the "
+            "backend to enable semantic search."
+        )
+    return response

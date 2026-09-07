@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import logging
 from hashlib import sha1
 from collections import defaultdict
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Iterable
 from langchain_core.documents import Document
 
 from .models import SearchResult
+
+logger = logging.getLogger(__name__)
 
 
 def _terms(text: str) -> list[str]:
@@ -61,6 +64,10 @@ class HybridIndex:
         self.chroma_dir.mkdir(parents=True, exist_ok=True)
         self._embeddings = embeddings
         self._vectorstore = None
+        self._semantic_search_enabled = embeddings is not None
+        self._semantic_search_error = ""
+        if embeddings is None:
+            self._semantic_search_error = "Semantic embeddings are not configured."
         self._setup_sqlite()
 
     def _connect(self) -> sqlite3.Connection:
@@ -83,7 +90,7 @@ class HybridIndex:
     def _store(self):
         if self._vectorstore is None:
             if self._embeddings is None:
-                raise RuntimeError("An embeddings object is required for semantic search.")
+                raise RuntimeError(self._semantic_search_error)
             from langchain_chroma import Chroma
 
             self._vectorstore = Chroma(
@@ -105,7 +112,7 @@ class HybridIndex:
         }
         # Re-indexing a document must replace its old chunks, including chunks
         # written by older versions of the ID scheme.
-        store = self._store()
+        store = self._store() if self._semantic_search_enabled else None
         with self._connect() as db:
             for document_id in document_ids:
                 old_ids = [
@@ -118,7 +125,7 @@ class HybridIndex:
                 db.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
                 for old_id in old_ids:
                     db.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (old_id,))
-        if document_ids:
+        if document_ids and store is not None:
             store.delete(where={"document_id": {"$in": list(document_ids)}})
 
         with self._connect() as db:
@@ -156,7 +163,19 @@ class HybridIndex:
                 )
         # Chroma's current API persists automatically. IDs are unique even
         # when separate sections have the same page-local chunk number.
-        store.add_documents(docs, ids=ids)
+        if store is not None:
+            try:
+                store.add_documents(docs, ids=ids)
+            except Exception as exc:
+                # Keep the SQLite FTS index usable when the hosted embedding
+                # provider is temporarily unreachable. Chat remains available
+                # through lexical retrieval until semantic search is restored.
+                self._semantic_search_enabled = False
+                self._semantic_search_error = str(exc)
+                logger.warning(
+                    "Semantic indexing unavailable; using lexical retrieval: %s",
+                    exc,
+                )
         return len(docs)
 
     def lexical_search(self, query: str, limit: int = 12) -> list[SearchResult]:
@@ -189,6 +208,8 @@ class HybridIndex:
         ]
 
     def vector_search(self, query: str, limit: int = 12) -> list[SearchResult]:
+        if not self._semantic_search_enabled:
+            return []
         docs_scores = self._store().similarity_search_with_relevance_scores(query, k=limit)
         return [
             SearchResult(
@@ -209,3 +230,11 @@ class HybridIndex:
     def has_documents(self) -> bool:
         with self._connect() as db:
             return db.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
+
+    @property
+    def semantic_search_available(self) -> bool:
+        return self._semantic_search_enabled
+
+    @property
+    def semantic_search_error(self) -> str:
+        return self._semantic_search_error

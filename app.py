@@ -56,6 +56,8 @@ with st.sidebar:
                     label=f"Indexed {payload['total_chunks']} chunks",
                     state="complete",
                 )
+                if payload.get("warning"):
+                    st.warning(payload["warning"])
             except RuntimeError as exc:
                 status.update(label="Indexing failed", state="error")
                 st.error(str(exc))
